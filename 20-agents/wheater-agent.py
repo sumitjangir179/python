@@ -1,5 +1,6 @@
 import os
 import json
+from pyexpat.errors import messages
 import requests
 
 from dotenv import load_dotenv
@@ -36,97 +37,44 @@ client = OpenAI(
 # ============================================================
 
 def get_temperature(city_name: str) -> str:
-    """
-    Get the current temperature for a city using wttr.in.
+    response = requests.get(f"https://wttr.in/{city_name.lower()}?format=%C+%t")
 
-    Args:
-        city_name: Name of the city.
+    if(response.status_code == 200):
+        return response.text
 
-    Returns:
-        Current temperature in Celsius.
-    """
+    return f"Error: Unable to fetch weather data for {city_name}."
 
-    url = f"https://wttr.in/{city_name}?format=j1"
-
-    response = requests.get(
-        url,
-        timeout=10,
-        headers={
-            "User-Agent": "weather-agent/1.0"
-        },
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    temperature = data["current_condition"][0]["temp_C"]
-
-    return (
-        f"The current temperature in {city_name} "
-        f"is {temperature}°C."
-    )
-
-
-# ============================================================
-# 4. Tell Gemini about our function
-# ============================================================
-
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_temperature",
-            "description": (
-                "Get the current temperature for a city. "
-                "Use this function whenever the user asks "
-                "for the current temperature or weather temperature."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city_name": {
-                        "type": "string",
-                        "description": (
-                            "The name of the city, "
-                            "for example Delhi, Mumbai, or Jaipur."
-                        ),
-                    }
-                },
-                "required": ["city_name"],
-            },
-        },
-    }
-]
-
-
-# ============================================================
-# 5. System prompt
-# ============================================================
 
 SYSTEM_PROMPT = """
-You are a helpful weather assistant.
+    You are an expert AI assistant in resolving user queries using chain of thought.
+    You work on START, PLAN, and OUTPUT steps.
+    You need to first PLAN what needs to be done. The PLAN can be multiple steps. 
+    Once you think enough PLAN has been done, finally you can give the OUTPUT.
+    You can also call the tools if required from the list of available tools.
 
-You have access to a tool called get_temperature.
+    Rules:
+     - Strictly follow the given JSON output format
+     - Only run one step at a time
+     - The sequence of steps is START (where user gives an input), PLAN (That can be multiple time) and OUTPUT.
 
-When the user asks for the current temperature of a city:
+    Output JSON format:
+      {step: "START" | "PLAN" | "OUTPUT", | "TOOL" , "content" : "string", "tool" : "string", "input" : "string",}
 
-1. Identify the city.
-2. Call get_temperature with the city name.
-3. Wait for the tool result.
-4. Use the tool result to answer the user.
-5. Never invent current temperature data.
+    Available tools:
+    1. get_temperature(city_name: str) -> str: get the city name as an input as an string and return the current temperature of the city in string format.
 
-If the user does not provide a city, ask them which city
-they want the temperature for.
+    Examples:
+      START: What is the current weather in Delhi?
+      PLAN: {"step": "PLAN", "content": "Seems like user is interested in getting the current weather of Delhi in India."}
+      PLAN: {"step": "PLAN", "content": "Let's see if we have any available tools from the list of available tools."}
+      PLAN: {"step": "PLAN", "content": "Great ! We have get_temperature tool from the list of available tools."}
+      PLAN: {"step": "PLAN", "content": "I need to call get_temperature tool to get the current temperature of Delhi."}
+      PLAN: {"step": "TOOL",  "tool": "get_temperature", "input": "Delhi"}
+      PLAN: {"step": "OBSERVE",  "tool": "get_temperature", "output": "The current temperature in Delhi is 35°C."}
+      PLAN: {"step": "PLAN", "content": "I have got the whole current weather of Delhi."}
+      OUTPUT: {"step": "OUTPUT", "content": "The current temperature in Delhi is 35°C."}
 
-Do not reveal private chain-of-thought or internal reasoning.
 """
-
-
-# ============================================================
-# 6. Conversation history
-# ============================================================
 
 messages = [
     {
@@ -135,158 +83,64 @@ messages = [
     }
 ]
 
+available_tools = {
+    "get_temperature": get_temperature,
+}
 
-# ============================================================
-# 7. Chat loop
-# ============================================================
 
-while True:
+user_input = input("> ")
 
-    user_input = input(
-        "\nYou (type 'exit' to quit): "
-    )
-
-    # --------------------------------------------------------
-    # Exit
-    # --------------------------------------------------------
-
-    if user_input.lower().strip() == "exit":
-        print("Goodbye!")
-        break
-
-    # --------------------------------------------------------
-    # Add user message
-    # --------------------------------------------------------
-
-    messages.append(
+messages.append(
         {
             "role": "user",
             "content": user_input,
         }
     )
 
-    try:
+while True:
 
-        # ====================================================
-        # 8. First call to Gemini
-        # ====================================================
+    try:
 
         response = client.chat.completions.create(
             model="gemini-3.6-flash",
-            messages=messages,
-            tools=tools,
-            tool_choice="auto",
+            messages= messages
         )
 
-        assistant_message = response.choices[0].message
+        raw_message = response.choices[0].message
+        messages.append({"role": "assistant", "content": raw_message.content})
+        parsed_message = json.loads(raw_message.content)
 
-        # ====================================================
-        # 9. Check whether Gemini wants to call a tool
-        # ====================================================
+        print(f"\n{parsed_message}\n")
 
-        if assistant_message.tool_calls:
+        if parsed_message["step"] == "START":
+            print(f"\n{parsed_message['content']}\n")
+            continue
 
-            # Add Gemini's tool-call message to history
-            messages.append(assistant_message)
+        if parsed_message["step"] == "TOOL":
+            tool_name = parsed_message["tool"]
+            tool_input = parsed_message["input"]
+            print(f"\nCalling tool: {tool_name} with input: {tool_input}\n")
+            tool_response = available_tools[tool_name](tool_input)
+            print(f"\nTool response: {tool_response}\n")
+            messages.append({"role": "developer", "content": json.dumps({"step": "OBSERVE", "tool": tool_name, "output": tool_response})})
+            continue
 
-            # =================================================
-            # 10. Execute every requested tool
-            # =================================================
+        if parsed_message["step"] == "PLAN":
+            print(f"\n{parsed_message['content']}\n")
+            messages.append({
+                "role": "user",
+                "content": "Continue to the next step."
+            })
+            continue
 
-            for tool_call in assistant_message.tool_calls:
+        if parsed_message["step"] == "OUTPUT":
+            print(f"\n{parsed_message['content']}\n")
+            break
 
-                function_name = tool_call.function.name
-
-                function_arguments = json.loads(
-                    tool_call.function.arguments
-                )
-
-                print(
-                    f"\n[Tool call] {function_name}"
-                )
-
-                print(
-                    f"[Arguments] {function_arguments}"
-                )
-
-                # ---------------------------------------------
-                # Execute our Python function
-                # ---------------------------------------------
-
-                if function_name == "get_temperature":
-
-                    city_name = function_arguments[
-                        "city_name"
-                    ]
-
-                    tool_result = get_temperature(
-                        city_name
-                    )
-
-                else:
-                    tool_result = (
-                        f"Unknown function: {function_name}"
-                    )
-
-                print(
-                    f"[Tool result] {tool_result}"
-                )
-
-                # =================================================
-                # 11. Send tool result back to Gemini
-                # =================================================
-
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": tool_result,
-                    }
-                )
-
-            # =================================================
-            # 12. Ask Gemini for the final answer
-            # =================================================
-
-            final_response = client.chat.completions.create(
-                model="gemini-3.6-flash",
-                messages=messages,
-                tools=tools,
-                tool_choice="auto",
-            )
-
-            final_message = (
-                final_response.choices[0].message
-            )
-
-            # Save final response
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": final_message.content,
-                }
-            )
-
-            print("\nAssistant:")
-            print(final_message.content)
-
-        else:
-
-            # =================================================
-            # No tool was required
-            # =================================================
-
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": assistant_message.content,
-                }
-            )
-
-            print("\nAssistant:")
-            print(assistant_message.content)
+        
 
     except Exception as e:
 
         print("\nError:")
         print(e)
+        break
