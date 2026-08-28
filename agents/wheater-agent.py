@@ -88,59 +88,80 @@ available_tools = {
 }
 
 
-user_input = input("> ")
-
-messages.append(
-        {
-            "role": "user",
-            "content": user_input,
-        }
-    )
-
 while True:
+    user_input = input("> ")
+
+    messages.append({
+        "role": "user",
+        "content": user_input
+    })
 
     try:
+        while True:
+            response = client.chat.completions.create(
+                model="gemini-3.6-flash",
+                response_format={"type": "json_object"},
+                messages=messages
+            )
 
-        response = client.chat.completions.create(
-            model="gemini-3.6-flash",
-            messages= messages
-        )
+            raw_message = response.choices[0].message
+            content = raw_message.content
 
-        raw_message = response.choices[0].message
-        messages.append({"role": "assistant", "content": raw_message.content})
-        parsed_message = json.loads(raw_message.content)
+            print("RAW:", content)
 
-        print(f"\n{parsed_message}\n")
-
-        if parsed_message["step"] == "START":
-            print(f"\n{parsed_message['content']}\n")
-            continue
-
-        if parsed_message["step"] == "TOOL":
-            tool_name = parsed_message["tool"]
-            tool_input = parsed_message["input"]
-            print(f"\nCalling tool: {tool_name} with input: {tool_input}\n")
-            tool_response = available_tools[tool_name](tool_input)
-            print(f"\nTool response: {tool_response}\n")
-            messages.append({"role": "developer", "content": json.dumps({"step": "OBSERVE", "tool": tool_name, "output": tool_response})})
-            continue
-
-        if parsed_message["step"] == "PLAN":
-            print(f"\n{parsed_message['content']}\n")
             messages.append({
-                "role": "user",
-                "content": "Continue to the next step."
+                "role": "assistant",
+                "content": content
             })
-            continue
 
-        if parsed_message["step"] == "OUTPUT":
-            print(f"\n{parsed_message['content']}\n")
-            break
+            parsed_message = json.loads(content)
 
-        
+            step = parsed_message["step"]
+
+            if step == "START":
+                print(f"\n{parsed_message['content']}\n")
+                continue
+
+            elif step == "PLAN":
+                print(f"\n{parsed_message['content']}\n")
+
+                # Give the model another turn so Gemini
+                # does not receive a conversation ending in assistant.
+                messages.append({
+                    "role": "user",
+                    "content": "Continue to the next step."
+                })
+
+                continue
+
+            elif step == "TOOL":
+                tool_name = parsed_message["tool"]
+                tool_input = parsed_message["input"]
+
+                print(
+                    f"\nCalling tool: {tool_name} "
+                    f"with input: {tool_input}\n"
+                )
+
+                tool_response = available_tools[tool_name](tool_input)
+
+                print(f"\nTool response: {tool_response}\n")
+
+                messages.append({
+                    "role": "user",
+                    "content": json.dumps({
+                        "step": "OBSERVE",
+                        "tool": tool_name,
+                        "output": tool_response
+                    })
+                })
+
+                continue
+
+            elif step == "OUTPUT":
+                print(f"\n{parsed_message['content']}\n")
+                break
 
     except Exception as e:
-
         print("\nError:")
         print(e)
-        break
